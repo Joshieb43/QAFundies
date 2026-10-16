@@ -480,7 +480,7 @@ def render_source(src: dict) -> None:
     st.markdown(
         f"{TYPE_ICON.get(src['type'], '🔗')} **[{src['title']}]({src['url']})**  \n"
         f"<span style='opacity:0.75'>{src['provider']} · {src['type']} · "
-        f"{LEVEL_BADGE[src['level']]} {src['level']}</span>  \n"
+        f"{LEVEL_BADGE.get(src['level'], '⚪')} {src['level']}</span>  \n"
         f"{src['note']}",
         unsafe_allow_html=True,
     )
@@ -541,7 +541,9 @@ if page == "🏠 Home":
         "The Practical Test Pyramid",
         "Test Automation University",
     ]:
-        render_source(next(s for s in SOURCES if s["title"] == title))
+        src = next((s for s in SOURCES if s["title"] == title), None)
+        if src:
+            render_source(src)
 
 elif page == "📚 Learn by topic":
     st.title("Learn by topic")
@@ -573,19 +575,28 @@ elif page == "📚 Learn by topic":
         if lo >= hi:
             st.warning("Minimum must be less than maximum.")
         else:
-            rows = [
+            # Boundaries come first so they keep their label when a narrow range
+            # makes the inner values (min+1, max-1, nominal) collide with them.
+            candidates = [
                 (lo - 1, "Invalid", "Just below minimum"),
                 (lo, "Valid", "Minimum"),
-                (lo + 1, "Valid", "Just above minimum"),
-                ((lo + hi) // 2, "Valid", "Nominal (equivalence class)"),
-                (hi - 1, "Valid", "Just below maximum"),
                 (hi, "Valid", "Maximum"),
                 (hi + 1, "Invalid", "Just above maximum"),
+                (lo + 1, "Valid", "Just above minimum"),
+                (hi - 1, "Valid", "Just below maximum"),
+                ((lo + hi) // 2, "Valid", "Nominal (equivalence class)"),
             ]
+            rows = {}
+            for value, expected, why in candidates:
+                rows.setdefault(value, (value, expected, why))
             st.dataframe(
-                pd.DataFrame(rows, columns=["Test value", "Expected", "Why"]),
+                pd.DataFrame(sorted(rows.values()), columns=["Test value", "Expected", "Why"]),
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
+            )
+            st.caption(
+                "This uses three-value boundary analysis: it adds min+1 and max−1 to the "
+                "classic two-value set (min−1, min, max, max+1), plus one nominal value."
             )
 
 elif page == "🔗 Source library":
@@ -599,7 +610,7 @@ elif page == "🔗 Source library":
     topic_filter = st.multiselect("Topic", list(TOPICS.keys()))
 
     def matches(s: dict) -> bool:
-        text = f"{s['title']} {s['provider']} {s['note']}".lower()
+        text = f"{s['title']} {s['provider']} {s['note']} {' '.join(s['topics'])}".lower()
         return (
             (not query or query.lower() in text)
             and (not types or s["type"] in types)
@@ -611,7 +622,9 @@ elif page == "🔗 Source library":
     st.write(f"**{len(results)}** of {len(SOURCES)} sources")
 
     view = st.radio("View", ["Cards", "Table"], horizontal=True, label_visibility="collapsed")
-    if view == "Cards":
+    if not results:
+        st.info("No sources match these filters. Try a different search or clear a filter.")
+    elif view == "Cards":
         for src in results:
             with st.container(border=True):
                 render_source(src)
@@ -624,7 +637,7 @@ elif page == "🔗 Source library":
         st.dataframe(
             df,
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
             column_config={"Link": st.column_config.LinkColumn("Link")},
         )
         st.download_button(
@@ -637,9 +650,13 @@ elif page == "🔗 Source library":
 elif page == "📖 Glossary":
     st.title("Glossary")
     term_q = st.text_input("Search terms", placeholder="e.g. regression")
+    shown = 0
     for term, definition in sorted(GLOSSARY.items()):
-        if not term_q or term_q.lower() in (term + definition).lower():
+        if not term_q or term_q.lower() in f"{term} {definition}".lower():
             st.markdown(f"**{term}** — {definition}")
+            shown += 1
+    if not shown:
+        st.info(f"No terms match '{term_q}'.")
     st.caption("For the full official glossary, see glossary.istqb.org.")
 
 elif page == "✅ Quiz":
@@ -647,7 +664,11 @@ elif page == "✅ Quiz":
 
     if "quiz_order" not in st.session_state:
         st.session_state.quiz_order = random.sample(range(len(QUIZ)), len(QUIZ))
-        st.session_state.submitted = False
+        # Shuffle each question's options too, so the answer position can't be guessed.
+        st.session_state.option_order = {
+            idx: random.sample(range(len(q["options"])), len(q["options"]))
+            for idx, q in enumerate(QUIZ)
+        }
 
     with st.form("quiz"):
         answers = {}
@@ -655,14 +676,22 @@ elif page == "✅ Quiz":
             item = QUIZ[idx]
             answers[idx] = st.radio(
                 f"**Q{n}.** {item['q']}",
-                options=range(len(item["options"])),
+                options=st.session_state.option_order[idx],
                 format_func=lambda i, item=item: item["options"][i],
                 index=None,
                 key=f"q_{idx}",
             )
         submitted = st.form_submit_button("Submit answers")
 
-    if submitted:
+    unanswered = [
+        n for n, idx in enumerate(st.session_state.quiz_order, start=1) if answers[idx] is None
+    ]
+    if submitted and unanswered:
+        st.warning(
+            "Please answer every question before submitting. Unanswered: "
+            + ", ".join(f"Q{n}" for n in unanswered)
+        )
+    elif submitted:
         score = sum(1 for idx, a in answers.items() if a == QUIZ[idx]["answer"])
         pct = score / len(QUIZ)
         st.subheader(f"Score: {score}/{len(QUIZ)}")
@@ -683,7 +712,7 @@ elif page == "✅ Quiz":
 
     if st.button("🔄 Shuffle & restart"):
         for key in list(st.session_state.keys()):
-            if key.startswith("q_") or key == "quiz_order":
+            if key.startswith("q_") or key in ("quiz_order", "option_order"):
                 del st.session_state[key]
         st.rerun()
 
